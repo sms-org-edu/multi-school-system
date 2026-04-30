@@ -2272,6 +2272,43 @@ function toYesNo(value) { return value ? 'Yes' : 'No'; }
 function fromYesNo(value) { return value === 'Yes'; }
 function dbId(value) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '')) ? value : undefined; }
 
+const SCHOOL_SETTINGS_DATE_FIELDS = ['school_license_issued_at','school_license_activated_at','school_license_expires_at','school_license_last_checked_at'];
+function normalizeSchoolSettingsWritePayload(payload={}) {
+  const clean = { ...payload };
+  delete clean.created_at;
+  delete clean.updated_at;
+  SCHOOL_SETTINGS_DATE_FIELDS.forEach(key => {
+    if (clean[key] === '' || clean[key] === undefined) clean[key] = null;
+  });
+  if (clean.id !== undefined && (clean.id === '' || clean.id === null || Number.isNaN(Number(clean.id)))) delete clean.id;
+  return clean;
+}
+function isSchoolSettingsPrimaryKeyError(error) {
+  const msg = String(error?.message || error || '');
+  return error?.code === '23505' && /school_settings_pkey|duplicate key value violates unique constraint\s+"school_settings_pkey"/i.test(msg);
+}
+async function nextSchoolSettingsNumericId() {
+  if (!supabase) return undefined;
+  const { data, error } = await supabase.from('school_settings').select('id').order('id', { ascending: false }).limit(1);
+  if (error) throw error;
+  const currentMax = Number(data?.[0]?.id || 0);
+  return Math.max(2, currentMax + 1);
+}
+async function safeUpsertSchoolSettings(payload, options={ onConflict: 'school_id' }) {
+  const clean = normalizeSchoolSettingsWritePayload(payload);
+  let result = await supabase.from('school_settings').upsert(clean, options);
+  if (!result.error) return result;
+  if (!isSchoolSettingsPrimaryKeyError(result.error)) return result;
+  let nextId = await nextSchoolSettingsNumericId();
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    result = await supabase.from('school_settings').upsert({ ...clean, id: nextId + attempt }, options);
+    if (!result.error) return result;
+    if (!isSchoolSettingsPrimaryKeyError(result.error)) return result;
+  }
+  return result;
+}
+
+
 async function resolveSalaryGradeBackendId(item, salaryGrades=[]) {
   const tenantId = getActiveSchoolId();
   const direct = dbId(item?.salary_grade_id || item?.id);
@@ -2815,7 +2852,7 @@ function usePersistentSchoolData() {
       PLATFORM_SETTING_KEYS.forEach(key => { delete copy[key]; });
       return copy;
     };
-    let { error } = await supabase.from('school_settings').upsert(payload, { onConflict: 'school_id' });
+    let { error } = await safeUpsertSchoolSettings(payload, { onConflict: 'school_id' });
     if (error && /header_theme_choice|footer_theme_choice|login_background_url|font_choice|platform_access_locked|school_admin_access_locked|school_license_plan|school_license_label|school_license_code|school_license_status|school_license_issued_at|school_license_activated_at|school_license_expires_at|school_license_last_checked_at/i.test(String(error.message || '')) && /column/i.test(String(error.message || ''))) {
       const fallbackPayload = { ...payload };
       delete fallbackPayload.header_theme_choice;
@@ -2827,13 +2864,13 @@ function usePersistentSchoolData() {
       delete fallbackPayload.logout_greeting_message;
       delete fallbackPayload.failed_login_greeting_message;
       PLATFORM_SETTING_KEYS.forEach(key => { delete fallbackPayload[key]; });
-      const fallback = await supabase.from('school_settings').upsert(fallbackPayload, { onConflict: 'school_id' });
+      const fallback = await safeUpsertSchoolSettings(fallbackPayload, { onConflict: 'school_id' });
       error = fallback.error;
     }
     if (error && isThemeConstraintError(error.message)) {
       rememberThemeSelections(payload.theme_choice, payload.header_theme_choice, payload.footer_theme_choice);
       const compatiblePayload = backendCompatibleSchoolThemePayload(payload);
-      const compatibleRetry = await supabase.from('school_settings').upsert(compatiblePayload, { onConflict: 'school_id' });
+      const compatibleRetry = await safeUpsertSchoolSettings(compatiblePayload, { onConflict: 'school_id' });
       if (compatibleRetry.error && /header_theme_choice|footer_theme_choice|login_background_url|font_choice|platform_access_locked|school_admin_access_locked|school_license_plan|school_license_label|school_license_code|school_license_status|school_license_issued_at|school_license_activated_at|school_license_expires_at|school_license_last_checked_at/i.test(String(compatibleRetry.error.message || '')) && /column/i.test(String(compatibleRetry.error.message || ''))) {
         const compatibleFallbackPayload = { ...compatiblePayload };
         delete compatibleFallbackPayload.header_theme_choice;
@@ -2845,7 +2882,7 @@ function usePersistentSchoolData() {
         delete compatibleFallbackPayload.logout_greeting_message;
         delete compatibleFallbackPayload.failed_login_greeting_message;
         PLATFORM_SETTING_KEYS.forEach(key => { delete compatibleFallbackPayload[key]; });
-        const compatibleFallback = await supabase.from('school_settings').upsert(compatibleFallbackPayload, { onConflict: 'school_id' });
+        const compatibleFallback = await safeUpsertSchoolSettings(compatibleFallbackPayload, { onConflict: 'school_id' });
         if (compatibleFallback.error) throw compatibleFallback.error;
       } else if (compatibleRetry.error) {
         throw compatibleRetry.error;
@@ -2854,7 +2891,7 @@ function usePersistentSchoolData() {
     }
     if (error && /platform_access_locked|school_admin_access_locked|school_license_plan|school_license_label|school_license_code|school_license_status|school_license_issued_at|school_license_activated_at|school_license_expires_at|school_license_last_checked_at/i.test(String(error.message || ''))) {
       rememberPlatformControlSettings(nextVal);
-      const fallback = await supabase.from('school_settings').upsert(stripPlatformPayloadFields(payload), { onConflict: 'school_id' });
+      const fallback = await safeUpsertSchoolSettings(stripPlatformPayloadFields(payload), { onConflict: 'school_id' });
       if (fallback.error && /login_background_url|font_choice|audio_greeting_enabled|login_greeting_template|logout_greeting_message|failed_login_greeting_message/i.test(String(fallback.error.message || ''))) {
         throw new Error('The backend personalization columns are missing. Run the latest personalization SQL update, then save again.');
       }
@@ -3131,8 +3168,8 @@ function usePersistentSchoolData() {
     if (!schoolCreated) throw new Error('The tenant code already exists. Please change the tenant code and try again.');
     const autoAdminUsername = `admin_${tenantCode.toLowerCase()}`;
     const adminUsername = String(admin_username || autoAdminUsername).trim();
-    const settingsPayload = { ...defaultSchool, school_id: schoolId, school_name: name, contact: String(contact_number || ''), school_license_label: 'No license issued' };
-    const { error: settingsError } = await supabase.from('school_settings').insert(settingsPayload);
+    const settingsPayload = normalizeSchoolSettingsWritePayload({ ...defaultSchool, school_id: schoolId, school_name: name, contact: String(contact_number || ''), school_license_label: 'No license issued', school_license_issued_at: null, school_license_activated_at: null, school_license_expires_at: null, school_license_last_checked_at: null });
+    const { error: settingsError } = await safeUpsertSchoolSettings(settingsPayload, { onConflict: 'school_id' });
     if (settingsError) throw settingsError;
     const { error: credError } = await supabase.from('user_credentials').insert({ school_id: schoolId, role: 'admin', linked_entity_id: ADMIN_LINKED_ENTITY_ID, username: adminUsername, temporary_password: adminPassword, force_password_change: false, account_active: true });
     if (credError) throw credError;
