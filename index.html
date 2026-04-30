@@ -299,7 +299,8 @@ async function syncPlatformBrandValue(brand=defaultPlatformBrand) {
     return false;
   }
 }
-function normalizeSchoolId(value) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '')) ? value : DEFAULT_SCHOOL_ID; }
+function isUuid(value) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || '')); }
+function normalizeSchoolId(value) { return isUuid(value) ? value : DEFAULT_SCHOOL_ID; }
 function getActiveSchoolId() { return normalizeSchoolId(safeStorageGet(ACTIVE_SCHOOL_ID_STORAGE_KEY) || DEFAULT_SCHOOL_ID); }
 function setActiveSchoolId(value) { const id = normalizeSchoolId(value); safeStorageSet(ACTIVE_SCHOOL_ID_STORAGE_KEY, id); return id; }
 function withSchoolId(row={}, schoolId=getActiveSchoolId()) { return { ...(row || {}), school_id: normalizeSchoolId(schoolId) }; }
@@ -328,8 +329,8 @@ function normalizeSchoolRegistration(row={}) {
     tenant_code: String(row.tenant_code || generateTenantCodeFromSchoolName(schoolName)).trim().toUpperCase(),
     status: row.status || 'Pending',
     requested_at: row.requested_at || new Date().toISOString(),
-    reviewed_at: row.reviewed_at || '',
-    created_school_id: row.created_school_id || ''
+    reviewed_at: row.reviewed_at || null,
+    created_school_id: isUuid(row.created_school_id) ? row.created_school_id : null
   };
 }
 async function readSchoolRegistrationCache() {
@@ -3131,7 +3132,18 @@ function usePersistentSchoolData() {
       notify('info', 'School registration saved locally. It will be visible to Super Admin on this device.');
       return payload;
     }
-    const { data: inserted, error } = await supabase.from('school_registration_requests').insert(payload).select().single();
+    const registrationInsertPayload = {
+      id: payload.id,
+      school_name: payload.school_name,
+      school_admin_full_name: payload.school_admin_full_name,
+      contact_number: payload.contact_number,
+      tenant_code: payload.tenant_code,
+      status: payload.status,
+      requested_at: payload.requested_at
+    };
+    if (payload.reviewed_at) registrationInsertPayload.reviewed_at = payload.reviewed_at;
+    if (isUuid(payload.created_school_id)) registrationInsertPayload.created_school_id = payload.created_school_id;
+    const { data: inserted, error } = await supabase.from('school_registration_requests').insert(registrationInsertPayload).select().single();
     if (error) throw new Error(/school_registration_requests/i.test(String(error.message || '')) ? 'Run the school registration SQL update first, then submit again.' : (error.message || 'School registration failed.'));
     payload = normalizeSchoolRegistration(inserted || payload);
     setData(current => {
@@ -3146,6 +3158,8 @@ function usePersistentSchoolData() {
   const updateSchoolRegistrationStatus = React.useCallback(async (registrationId, patch={}) => {
     if (!registrationId) return;
     const nextPatch = { ...patch };
+    if ('created_school_id' in nextPatch && !isUuid(nextPatch.created_school_id)) nextPatch.created_school_id = null;
+    if ('reviewed_at' in nextPatch && !nextPatch.reviewed_at) nextPatch.reviewed_at = null;
     if ((patch.status === 'Approved' || patch.status === 'Rejected') && !patch.reviewed_at) nextPatch.reviewed_at = new Date().toISOString();
     if (supabase && browserOnline()) {
       const { error } = await supabase.from('school_registration_requests').update(nextPatch).eq('id', registrationId);
