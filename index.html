@@ -319,6 +319,22 @@ function generateTenantCodeFromSchoolName(name) {
   const base = (initials + compact.slice(0, Math.max(4, 10 - initials.length))).replace(/[^A-Z0-9]/g, '').slice(0, 10);
   return base || `SCH${Date.now().toString().slice(-5)}`;
 }
+function normalizeTenantCodeValue(value) {
+  return String(value || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 12).toUpperCase();
+}
+function buildUniqueTenantCode(baseCode, existingCodes=[], attempt=0) {
+  const list = existingCodes && typeof existingCodes[Symbol.iterator] === 'function' ? Array.from(existingCodes) : [];
+  const usedCodes = new Set(list.map(code => normalizeTenantCodeValue(code)).filter(Boolean));
+  const cleanBase = normalizeTenantCodeValue(baseCode) || `SCH${Date.now().toString().slice(-5)}`;
+  if (attempt <= 0 && !usedCodes.has(cleanBase)) return cleanBase;
+  const start = Math.max(1, Number(attempt) || 1);
+  for (let i = start; i < 100; i += 1) {
+    const suffix = String(i + 1);
+    const candidate = `${cleanBase.slice(0, Math.max(1, 12 - suffix.length))}${suffix}`;
+    if (!usedCodes.has(candidate)) return candidate;
+  }
+  return normalizeTenantCodeValue(`${cleanBase.slice(0, 8)}${Date.now().toString().slice(-4)}`);
+}
 function normalizeSchoolRegistration(row={}) {
   const schoolName = String(row.school_name || '').trim();
   return {
@@ -3097,13 +3113,24 @@ function usePersistentSchoolData() {
     const schoolId = generateUuid();
     const name = String(school_name || '').trim();
     if (!name) throw new Error('School name is required.');
-    const tenantCode = String(tenant_code || generateTenantCodeFromSchoolName(name)).replace(/[^a-zA-Z0-9]/g, '').slice(0, 12).toUpperCase() || `SCH${Date.now().toString().slice(-5)}`;
-    const adminUsername = String(admin_username || `admin_${tenantCode.toLowerCase()}`).trim();
+    const baseTenantCode = normalizeTenantCodeValue(tenant_code || generateTenantCodeFromSchoolName(name)) || `SCH${Date.now().toString().slice(-5)}`;
+    const existingCodes = new Set(safeArray(data.schools).map(school => normalizeTenantCodeValue(school?.tenant_code)).filter(Boolean));
+    let tenantCode = buildUniqueTenantCode(baseTenantCode, existingCodes);
+    let schoolCreated = false;
     const adminPassword = String(admin_password || generatePassword()).trim();
     if (!supabase || !browserOnline()) throw new Error('Creating a new school tenant requires Supabase and internet access.');
-    const schoolPayload = { id: schoolId, school_name: name, tenant_code: tenantCode, status: 'Active' };
-    const { error: schoolError } = await supabase.from('schools').insert(schoolPayload);
-    if (schoolError) throw schoolError;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      tenantCode = attempt === 0 ? buildUniqueTenantCode(baseTenantCode, existingCodes, 0) : buildUniqueTenantCode(baseTenantCode, existingCodes, attempt);
+      const schoolPayload = { id: schoolId, school_name: name, tenant_code: tenantCode, status: 'Active' };
+      const { error: schoolError } = await supabase.from('schools').insert(schoolPayload);
+      if (!schoolError) { schoolCreated = true; break; }
+      const duplicateTenantCode = schoolError.code === '23505' || /duplicate key|schools_tenant_code_key/i.test(String(schoolError.message || ''));
+      if (duplicateTenantCode) { existingCodes.add(tenantCode); continue; }
+      throw schoolError;
+    }
+    if (!schoolCreated) throw new Error('The tenant code already exists. Please change the tenant code and try again.');
+    const autoAdminUsername = `admin_${tenantCode.toLowerCase()}`;
+    const adminUsername = String(admin_username || autoAdminUsername).trim();
     const settingsPayload = { ...defaultSchool, school_id: schoolId, school_name: name, contact: String(contact_number || ''), school_license_label: 'No license issued' };
     const { error: settingsError } = await supabase.from('school_settings').insert(settingsPayload);
     if (settingsError) throw settingsError;
@@ -3114,9 +3141,9 @@ function usePersistentSchoolData() {
         await supabase.from('school_registration_requests').update({ status: 'Approved', reviewed_at: new Date().toISOString(), created_school_id: schoolId }).eq('id', created_from_registration_id);
       } catch (registrationError) { console.warn('Registration status update failed', registrationError); }
     }
-    notify('success', `School tenant created. Admin username: ${adminUsername}, password: ${adminPassword}`);
+    notify('success', `School tenant created with tenant code ${tenantCode}. Admin username: ${adminUsername}, password: ${adminPassword}`);
     return await reloadData({ silent: true, schoolId });
-  }, [notify, reloadData]);
+  }, [data.schools, notify, reloadData]);
 
   const submitSchoolRegistration = React.useCallback(async ({ school_name, school_admin_full_name, contact_number }) => {
     const schoolName = String(school_name || '').trim();
@@ -3999,7 +4026,7 @@ function SuperAdminSchoolsManager() {
       await createSchoolTenant({
         school_name: request.school_name,
         tenant_code: request.tenant_code || generateTenantCodeFromSchoolName(request.school_name),
-        admin_username: `admin_${String(request.tenant_code || generateTenantCodeFromSchoolName(request.school_name)).toLowerCase()}`,
+        admin_username: '',
         admin_password: '',
         admin_full_name: request.school_admin_full_name,
         contact_number: request.contact_number,
