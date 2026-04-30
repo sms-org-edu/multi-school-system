@@ -3199,6 +3199,35 @@ function usePersistentSchoolData() {
     });
   }, []);
 
+  const deleteSchoolRegistrationRequest = React.useCallback(async (registrationId, options={}) => {
+    if (!registrationId) return;
+    const deleteLinkedTenant = options.deleteLinkedTenant !== false;
+    const currentRequests = safeArray(data.schoolRegistrations);
+    const request = currentRequests.find(row => row.id === registrationId);
+    const linkedSchoolId = isUuid(request?.created_school_id) ? request.created_school_id : null;
+    const linkedTenantCode = normalizeTenantCodeValue(request?.tenant_code || '');
+    let linkedSchool = linkedSchoolId ? safeArray(data.schools).find(school => school.id === linkedSchoolId) : null;
+    if (!linkedSchool && linkedTenantCode) linkedSchool = safeArray(data.schools).find(school => normalizeTenantCodeValue(school?.tenant_code) === linkedTenantCode);
+    const schoolIdToDelete = isUuid(linkedSchool?.id) && linkedSchool.id !== DEFAULT_SCHOOL_ID ? linkedSchool.id : null;
+
+    if (supabase && browserOnline()) {
+      if (deleteLinkedTenant && schoolIdToDelete) {
+        const { error: tenantDeleteError } = await supabase.from('schools').delete().eq('id', schoolIdToDelete);
+        if (tenantDeleteError) throw tenantDeleteError;
+      }
+      const { error: requestDeleteError } = await supabase.from('school_registration_requests').delete().eq('id', registrationId);
+      if (requestDeleteError) throw requestDeleteError;
+    }
+
+    setData(current => {
+      const nextRequests = safeArray(current.schoolRegistrations).filter(row => row.id !== registrationId);
+      const nextSchools = deleteLinkedTenant && schoolIdToDelete ? safeArray(current.schools).filter(school => school.id !== schoolIdToDelete) : safeArray(current.schools);
+      writeSchoolRegistrationCache(nextRequests);
+      if (schoolIdToDelete && getActiveSchoolId() === schoolIdToDelete) setActiveSchoolId(DEFAULT_SCHOOL_ID);
+      return { ...current, schoolRegistrations: nextRequests, schools: nextSchools };
+    });
+  }, [data.schoolRegistrations, data.schools]);
+
   const setPlatformBrand = React.useCallback(async updater => {
     const currentBrand = normalizePlatformBrand(data.platformBrand || defaultPlatformBrand);
     const nextBrand = normalizePlatformBrand(typeof updater === 'function' ? updater(currentBrand) : updater);
@@ -3210,7 +3239,7 @@ function usePersistentSchoolData() {
     return nextBrand;
   }, [data, offlineState.pendingCount, offlineState.lastSyncAt, notify]);
 
-  return { data, loaded, persist, updateCollection, setSchoolSettings, setPlatformBrand, reloadData, switchSchoolTenant, createSchoolTenant, submitSchoolRegistration, updateSchoolRegistrationStatus, activeSchoolId: getActiveSchoolId(), setPresenceStatus, notify, notifications, dismissNotification, busyText, offlineState, flushPendingChanges, addArchiveRecord, removeArchiveRecord };
+  return { data, loaded, persist, updateCollection, setSchoolSettings, setPlatformBrand, reloadData, switchSchoolTenant, createSchoolTenant, submitSchoolRegistration, updateSchoolRegistrationStatus, deleteSchoolRegistrationRequest, activeSchoolId: getActiveSchoolId(), setPresenceStatus, notify, notifications, dismissNotification, busyText, offlineState, flushPendingChanges, addArchiveRecord, removeArchiveRecord };
 }
 
 function Modal({ open, title, onClose, children, max='max-w-4xl' }) { if (!open) return null; return <div className="fixed inset-0 modal-backdrop z-50 flex items-center justify-center p-4"><div className={`bg-white rounded-2xl w-full ${max} max-h-[92vh] overflow-auto shadow-2xl`}><div className="sticky top-0 bg-white border-b px-5 py-4 flex items-center justify-between"><h3 className="text-xl font-bold">{title}</h3><button onClick={onClose} className="text-slate-500 hover:text-red-600"><i className="fas fa-times text-xl"></i></button></div><div className="p-5">{children}</div></div></div>; }
@@ -3982,7 +4011,7 @@ function SchoolAdminLicenseUsage({ lockedMode=false }) {
 }
 
 function SuperAdminSchoolsManager() {
-  const { data, switchSchoolTenant, createSchoolTenant, updateSchoolRegistrationStatus, setPlatformBrand, notify } = React.useContext(DataContext);
+  const { data, switchSchoolTenant, createSchoolTenant, updateSchoolRegistrationStatus, deleteSchoolRegistrationRequest, setPlatformBrand, notify } = React.useContext(DataContext);
   const [form, setForm] = React.useState({ school_name: '', tenant_code: '', admin_username: '', admin_password: '' });
   const [brandForm, setBrandForm] = React.useState(() => normalizePlatformBrand(data.platformBrand || defaultPlatformBrand));
   const [savingBrand, setSavingBrand] = React.useState(false);
@@ -4042,6 +4071,17 @@ function SuperAdminSchoolsManager() {
     try { await updateSchoolRegistrationStatus(request.id, { status: 'Rejected', reviewed_at: new Date().toISOString() }); notify('success', 'School registration request marked as rejected.'); }
     catch (error) { notify('error', error?.message || 'Failed to update registration request.'); }
     finally { setProcessingRequestId(''); }
+  };
+  const deleteRegistration = async request => {
+    const linkedTenantText = request?.created_school_id ? ' This will also remove the linked active school tenant and all tenant data connected to this registration.' : '';
+    if (!window.confirm(`Delete ${request?.school_name || 'this school registration request'} permanently?${linkedTenantText} The school must register again before it can be reviewed again.`)) return;
+    setProcessingRequestId(request.id);
+    try {
+      await deleteSchoolRegistrationRequest(request.id, { deleteLinkedTenant: true });
+      notify('success', 'School registration request deleted permanently.');
+    } catch (error) {
+      notify('error', error?.message || 'Failed to delete registration request.');
+    } finally { setProcessingRequestId(''); }
   };
   const togglePublicAudioGreeting = () => {
     const nextEnabled = !(brandForm.audio_greeting_enabled !== false);
@@ -4131,12 +4171,18 @@ function SuperAdminSchoolsManager() {
     </div>
 
     <div className="card p-5 space-y-4"><SectionHeader title="Create New School Tenant" subtitle="This creates a new school record, separate settings, and a unique School Admin credential for the new school." /><form onSubmit={createTenant} className="grid md:grid-cols-2 gap-4"><Field label="School Name"><input className="input" required value={form.school_name} onChange={e => updateSchoolName(e.target.value)} placeholder="Example Academy" /></Field><Field label="Tenant Code"><input className="input uppercase" value={form.tenant_code} onChange={e => setForm({ ...form, tenant_code: e.target.value.toUpperCase() })} placeholder="Auto-generated by school name" /></Field><Field label="School Admin Username"><input className="input" value={form.admin_username} onChange={e => setForm({ ...form, admin_username: e.target.value })} placeholder="Auto-generated if blank" /></Field><Field label="School Admin Password"><input className="input" value={form.admin_password} onChange={e => setForm({ ...form, admin_password: e.target.value })} placeholder="Auto-generated if blank" /></Field><div className="md:col-span-2 flex justify-end"><button className="btn btn-primary" disabled={creating} type="submit"><i className="fas fa-plus mr-2"></i>{creating ? 'Creating...' : 'Create School Tenant'}</button></div></form></div>
-    <div className="card p-4 table-wrap"><div className="mb-3"><SectionHeader title="New School Registration Requests" subtitle="Schools that click Register Now on the login page appear here for Super Admin review." /></div><table className="min-w-full text-sm"><thead><tr className="border-b"><th className="text-left py-3 px-3 font-semibold">School</th><th className="text-left py-3 px-3 font-semibold">School Admin</th><th className="text-left py-3 px-3 font-semibold">Contact</th><th className="text-left py-3 px-3 font-semibold">Tenant Code</th><th className="text-left py-3 px-3 font-semibold">Status</th><th className="text-left py-3 px-3 font-semibold">Requested</th><th className="text-left py-3 px-3 font-semibold">Action</th></tr></thead><tbody>{registrations.length === 0 ? <tr><td colSpan="7" className="py-6 px-3 text-center text-slate-500">No school registration request yet.</td></tr> : registrations.map(request => <tr key={request.id} className="border-b last:border-b-0"><td className="py-3 px-3 font-semibold">{request.school_name}</td><td className="py-3 px-3">{request.school_admin_full_name}</td><td className="py-3 px-3">{request.contact_number}</td><td className="py-3 px-3 font-mono font-bold">{request.tenant_code}</td><td className="py-3 px-3"><span className={`pill ${statusClass(request.status)}`}>{request.status || 'Pending'}</span></td><td className="py-3 px-3">{formatDateTime(request.requested_at)}</td><td className="py-3 px-3"><div className="flex gap-2 flex-wrap">{String(request.status || 'Pending') === 'Pending' && <button type="button" className="btn btn-primary" disabled={processingRequestId === request.id} onClick={() => createTenantFromRegistration(request)}><i className="fas fa-check mr-2"></i>{processingRequestId === request.id ? 'Processing...' : 'Create Tenant'}</button>} {String(request.status || 'Pending') === 'Pending' && <button type="button" className="btn btn-outline" disabled={processingRequestId === request.id} onClick={() => rejectRegistration(request)}>Reject</button>}{String(request.status || 'Pending') !== 'Pending' && <span className="text-xs text-slate-500">Reviewed</span>}</div></td></tr>)}</tbody></table></div>
+    <div className="card p-4 table-wrap">
+      <div className="mb-3"><SectionHeader title="New School Registration Requests" subtitle="Schools that click Register Now on the login page appear here for Super Admin review. Deleted requests are removed permanently and will appear again only if the school registers again." /></div>
+      <table className="min-w-full text-sm">
+        <thead><tr className="border-b"><th className="text-left py-3 px-3 font-semibold">School</th><th className="text-left py-3 px-3 font-semibold">School Admin</th><th className="text-left py-3 px-3 font-semibold">Contact</th><th className="text-left py-3 px-3 font-semibold">Tenant Code</th><th className="text-left py-3 px-3 font-semibold">Status</th><th className="text-left py-3 px-3 font-semibold">Requested</th><th className="text-left py-3 px-3 font-semibold">Action</th></tr></thead>
+        <tbody>{registrations.length === 0 ? <tr><td colSpan="7" className="py-6 px-3 text-center text-slate-500">No school registration request yet.</td></tr> : registrations.map(request => <tr key={request.id} className="border-b last:border-b-0"><td className="py-3 px-3 font-semibold">{request.school_name}</td><td className="py-3 px-3">{request.school_admin_full_name}</td><td className="py-3 px-3">{request.contact_number}</td><td className="py-3 px-3 font-mono font-bold">{request.tenant_code}</td><td className="py-3 px-3"><span className={`pill ${statusClass(request.status)}`}>{request.status || 'Pending'}</span></td><td className="py-3 px-3">{formatDateTime(request.requested_at)}</td><td className="py-3 px-3"><div className="flex gap-2 flex-wrap">{String(request.status || 'Pending') === 'Pending' && <button type="button" className="btn btn-primary" disabled={processingRequestId === request.id} onClick={() => createTenantFromRegistration(request)}><i className="fas fa-check mr-2"></i>{processingRequestId === request.id ? 'Processing...' : 'Create Tenant'}</button>} {String(request.status || 'Pending') === 'Pending' && <button type="button" className="btn btn-outline" disabled={processingRequestId === request.id} onClick={() => rejectRegistration(request)}>Reject</button>}{String(request.status || 'Pending') !== 'Pending' && <span className="text-xs text-slate-500">Reviewed</span>}<button type="button" className="btn btn-danger" disabled={processingRequestId === request.id} onClick={() => deleteRegistration(request)}><i className="fas fa-trash mr-2"></i>Delete</button></div></td></tr>)}</tbody>
+      </table>
+    </div>
     <div className="card p-4 table-wrap"><div className="mb-3"><SectionHeader title="Active School Tenants" subtitle="Switch to a school tenant to manage its license, access, and School Admin credentials." /></div><table className="min-w-full text-sm"><thead><tr className="border-b"><th className="text-left py-3 px-3 font-semibold">School</th><th className="text-left py-3 px-3 font-semibold">Tenant Code</th><th className="text-left py-3 px-3 font-semibold">school_id</th><th className="text-left py-3 px-3 font-semibold">Status</th><th className="text-left py-3 px-3 font-semibold">Action</th></tr></thead><tbody>{schools.map(school => <tr key={school.id} className="border-b last:border-b-0"><td className="py-3 px-3 font-semibold">{school.school_name || school.name || 'Unnamed school'}</td><td className="py-3 px-3">{school.tenant_code || 'DEFAULT'}</td><td className="py-3 px-3 font-mono text-xs">{school.id}</td><td className="py-3 px-3"><span className={"pill " + (String(school.status || 'Active') === 'Active' ? 'online' : 'offline')}>{school.status || 'Active'}</span></td><td className="py-3 px-3"><button type="button" className={"btn " + (school.id === activeId ? 'btn-secondary' : 'btn-outline')} disabled={school.id === activeId} onClick={() => switchSchoolTenant(school.id)}>{school.id === activeId ? 'Current School' : 'Switch to School'}</button></td></tr>)}</tbody></table></div>
   </div>;
 }
 function SuperAdminDashboard({ activeNav }) {
-  const { data, setSchoolSettings, updateCollection, notify } = React.useContext(DataContext);
+  const { data, setSchoolSettings, updateCollection, switchSchoolTenant, notify } = React.useContext(DataContext);
   const adminCredential = ensureAdminCredential(data.credentials).find(x => x.role === 'admin') || normalizeAdminCredential(DEFAULT_ADMIN_CREDENTIAL);
   const resolveForcePasswordChoice = value => value === true || String(value || '').toLowerCase() === 'yes' ? 'Yes' : 'No';
   const [credentialForm, setCredentialForm] = React.useState({ username: adminCredential.username || 'admin', temporary_password: adminCredential.temporary_password || 'admin12345', force_password_change: resolveForcePasswordChoice(adminCredential.force_password_change) });
@@ -4144,6 +4190,15 @@ function SuperAdminDashboard({ activeNav }) {
   React.useEffect(() => setCredentialForm({ username: adminCredential.username || 'admin', temporary_password: adminCredential.temporary_password || 'admin12345', force_password_change: resolveForcePasswordChoice(adminCredential.force_password_change) }), [adminCredential.username, adminCredential.temporary_password, adminCredential.force_password_change]);
   const license = getLicenseState(data.schoolSettings);
   const restricted = isSchoolAdminAccessRestricted(data.schoolSettings);
+  const credentialSchoolId = normalizeSchoolId(data.schoolSettings?.school_id || getActiveSchoolId());
+  const approvedSchoolAdminById = new Map(safeArray(data.schoolRegistrations).filter(row => ['approved','accepted'].includes(String(row.status || '').toLowerCase()) && isUuid(row.created_school_id)).map(row => [row.created_school_id, row.school_admin_full_name || 'School Admin']));
+  const credentialSchoolOptions = (safeArray(data.schools).length ? safeArray(data.schools) : [{ id: credentialSchoolId, school_name: data.schoolSettings?.school_name || defaultSchool.school_name, tenant_code: 'DEFAULT' }]).filter(school => isUuid(school.id));
+  const selectedCredentialSchool = credentialSchoolOptions.find(school => school.id === credentialSchoolId) || credentialSchoolOptions[0] || null;
+  const selectedCredentialSchoolAdminName = approvedSchoolAdminById.get(credentialSchoolId) || 'School Admin';
+  const selectCredentialSchool = async schoolId => {
+    const targetId = normalizeSchoolId(schoolId);
+    if (targetId && targetId !== credentialSchoolId) await switchSchoolTenant(targetId);
+  };
   const saveSchoolAdminCredential = async e => {
     e.preventDefault();
     const username = String(credentialForm.username || '').trim();
@@ -4223,7 +4278,7 @@ function SuperAdminDashboard({ activeNav }) {
     await setSchoolSettings(current => ({ ...current, school_license_plan: '', school_license_label: 'No license issued', school_license_code: '', school_license_status: 'Not Issued', school_license_issued_at: '', school_license_activated_at: '', school_license_expires_at: '', school_license_last_checked_at: new Date().toISOString(), school_admin_access_locked: false, platform_access_locked: false }));
     notify('success', 'School Admin license record cleared.');
   };
-  const credentialsPanel = <div className="card p-5 space-y-4"><SectionHeader title="Issue School Admin Credentials" subtitle="Only the Super Admin can issue or reset the School Admin login credentials." actions={<button type="button" onClick={generateAdminCredential} className="btn btn-outline"><i className="fas fa-wand-magic-sparkles mr-2"></i>Generate Unique Credentials</button>} /><form onSubmit={saveSchoolAdminCredential} className="grid md:grid-cols-[1fr_1fr_220px_auto] gap-4 items-end"><Field label="School Admin Username"><input className="input" value={credentialForm.username} onChange={e => setCredentialForm({ ...credentialForm, username: e.target.value })} /></Field><Field label="School Admin Password"><input className="input" value={credentialForm.temporary_password} onChange={e => setCredentialForm({ ...credentialForm, temporary_password: e.target.value })} /></Field><Field label="Force Password Change"><select className="select" value={credentialForm.force_password_change} onChange={e => setCredentialForm({ ...credentialForm, force_password_change: e.target.value })}>{FORCE_PASSWORD_CHANGE.map(x => <option key={x} value={x}>{x}</option>)}</select></Field><button className="btn btn-primary" type="submit">Save Credentials</button></form><div className="flex flex-wrap gap-2"><button className="btn btn-outline" type="button" onClick={resetAdminPassword}><i className="fas fa-key mr-2"></i>Reset School Admin Password Only</button></div><div className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-sm"><b>Current School Admin:</b> {adminCredential.username} <span className="mx-2">•</span> <b>Password:</b> {adminCredential.temporary_password} <span className="mx-2">•</span> <b>Force Password Change:</b> {resolveForcePasswordChoice(adminCredential.force_password_change)}</div></div>;
+  const credentialsPanel = <div className="card p-5 space-y-4"><SectionHeader title="Issue School Admin Credentials" subtitle="Only the Super Admin can issue or reset the selected school's School Admin login credentials." actions={<button type="button" onClick={generateAdminCredential} className="btn btn-outline"><i className="fas fa-wand-magic-sparkles mr-2"></i>Generate Unique Credentials</button>} /><div className="grid md:grid-cols-[1.2fr_1fr] gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-4"><Field label="Select Approved / Active School"><select className="select" value={credentialSchoolId} onChange={e => selectCredentialSchool(e.target.value)}>{credentialSchoolOptions.map(school => { const adminName = approvedSchoolAdminById.get(school.id) || 'School Admin'; return <option key={school.id} value={school.id}>{school.school_name || 'Unnamed school'} - {adminName}</option>; })}</select></Field><div className="rounded-xl bg-white border border-slate-200 p-3 text-sm"><div><b>Selected School:</b> {selectedCredentialSchool?.school_name || data.schoolSettings?.school_name || 'Current school'}</div><div className="mt-1"><b>Linked School Admin Name:</b> {selectedCredentialSchoolAdminName}</div><div className="mt-1"><b>Tenant Code:</b> {selectedCredentialSchool?.tenant_code || 'DEFAULT'}</div></div></div><form onSubmit={saveSchoolAdminCredential} className="grid md:grid-cols-[1fr_1fr_220px_auto] gap-4 items-end"><Field label="School Admin Username"><input className="input" value={credentialForm.username} onChange={e => setCredentialForm({ ...credentialForm, username: e.target.value })} /></Field><Field label="School Admin Password"><input className="input" value={credentialForm.temporary_password} onChange={e => setCredentialForm({ ...credentialForm, temporary_password: e.target.value })} /></Field><Field label="Force Password Change"><select className="select" value={credentialForm.force_password_change} onChange={e => setCredentialForm({ ...credentialForm, force_password_change: e.target.value })}>{FORCE_PASSWORD_CHANGE.map(x => <option key={x} value={x}>{x}</option>)}</select></Field><button className="btn btn-primary" type="submit">Save Credentials</button></form><div className="flex flex-wrap gap-2"><button className="btn btn-outline" type="button" onClick={resetAdminPassword}><i className="fas fa-key mr-2"></i>Reset School Admin Password Only</button></div><div className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-sm"><b>Current School Admin:</b> {adminCredential.username} <span className="mx-2">•</span> <b>Password:</b> {adminCredential.temporary_password} <span className="mx-2">•</span> <b>Force Password Change:</b> {resolveForcePasswordChoice(adminCredential.force_password_change)}</div></div>;
   const accessPanel = <div className="card p-5 space-y-4"><SectionHeader title="Platform-Level Access Control" subtitle="Locking access fades and blocks School Admin plus all issued user portal navigation. Login and logout remain available; only the School Admin license activation section remains available." /><div className="grid-fit"><StatCard label="School Admin Access" value={restricted ? 'Locked' : 'Unlocked'} icon={restricted ? 'lock' : 'unlock'} accent={restricted ? 'rose' : 'emerald'} /><StatCard label="License Status" value={license.status} icon="certificate" accent={license.active ? 'emerald' : 'amber'} /><StatCard label="License Plan" value={license.planLabel} icon="calendar-check" accent="blue" /></div><div className="flex flex-wrap gap-3"><button type="button" className="btn btn-danger" onClick={() => setAdminLock(true)}><i className="fas fa-lock mr-2"></i>Lock School Admin Full Access</button><button type="button" className="btn btn-primary" onClick={() => setAdminLock(false)}><i className="fas fa-unlock mr-2"></i>Unlock School Admin Full Access</button></div></div>;
   const licensePanel = <div className="space-y-4"><LicenseSummaryCard settings={data.schoolSettings} /><div className="card p-5 space-y-4"><SectionHeader title="Issue License for School Admin Operation" subtitle="Choose a license plan and generate the code the School Admin must activate under License Plan Usage." /><form onSubmit={issueLicense} className="grid md:grid-cols-[1fr_auto] gap-4 items-end"><Field label="License Plan"><select className="select" value={licensePlan} onChange={e => setLicensePlan(e.target.value)}>{Object.entries(LICENSE_PLAN_OPTIONS).map(([key, plan]) => <option key={key} value={key}>{plan.label}</option>)}</select></Field><button type="submit" className="btn btn-primary"><i className="fas fa-certificate mr-2"></i>Generate and Issue License</button></form><div className="flex flex-wrap gap-2"><button type="button" className="btn btn-outline" onClick={clearLicense}><i className="fas fa-trash mr-2"></i>Clear License</button></div></div></div>;
   if (activeNav === 'schools') return <SuperAdminSchoolsManager />;
