@@ -112,6 +112,7 @@ const ACCOUNT_STATUS = ['Active', 'Inactive'];
 const TERMS = ['Term 1', 'Term 2', 'Term 3'];
 const PAYMENT_METHODS = ['Cash', 'Mobile Money', 'Bank Transfer', 'Cheque'];
 const FORCE_PASSWORD_CHANGE = ['Yes', 'No'];
+const PROMOTION_PASS_MARK_OPTIONS = Array.from({ length: 11 }, (_, index) => String(40 + index));
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 const CHAT_MODES = {
   superadmin: ['Platform Access', 'Licensing'],
@@ -187,6 +188,14 @@ function normalizeThemeChoice(value) { return THEME_OPTIONS[value] ? value : 'em
 function normalizeHeaderThemeChoice(value) { return HEADER_THEME_OPTIONS[value] ? value : 'softWhite'; }
 function normalizeFooterThemeChoice(value) { return FOOTER_THEME_OPTIONS[value] ? value : 'midnight'; }
 function normalizeFontChoice(value) { return FONT_OPTIONS[value] ? value : 'inter'; }
+function normalizePromotionPassMark(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 50;
+  return Math.min(50, Math.max(40, Math.round(numeric)));
+}
+function getPromotionPassMark(data={}) {
+  return normalizePromotionPassMark(data?.schoolSettings?.promotion_pass_mark ?? defaultSchool.promotion_pass_mark ?? 50);
+}
 function isThemeConstraintError(message) { return /school_settings_(theme_choice|header_theme_choice|footer_theme_choice)_check|theme_choice|header_theme_choice|footer_theme_choice/i.test(String(message || '')); }
 function safeStorageGet(key) { try { return localStorage.getItem(key) || ''; } catch (e) { return ''; } }
 function safeStorageSet(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
@@ -355,7 +364,7 @@ async function readSchoolRegistrationCache() {
 async function writeSchoolRegistrationCache(records=[]) {
   try { await offlineStore.setItem(SCHOOL_REGISTRATION_CACHE_KEY, clonePlain(safeArray(records))); } catch (e) {}
 }
-const defaultSchool = { school_id: DEFAULT_SCHOOL_ID, school_name: SYSTEM_DEFAULT_NAME, address: '', contact: '', location: '', logo_url: '', theme_choice: 'emerald', header_theme_choice: 'softWhite', footer_theme_choice: 'midnight', login_background_url: '', font_choice: 'inter', principal_signature_url: '', audio_greeting_enabled: true, login_greeting_template: 'Welcome {firstName}, You may proceed.', logout_greeting_message: 'Goodbye, Nice having you on board.', failed_login_greeting_message: 'Login fails, please verify your identity carefully or contact your school IT department to ratify the issue.', platform_access_locked: false, school_admin_access_locked: false, school_license_plan: '', school_license_label: 'No license issued', school_license_code: '', school_license_status: 'Not Issued', school_license_issued_at: '', school_license_activated_at: '', school_license_expires_at: '', school_license_last_checked_at: '' };
+const defaultSchool = { school_id: DEFAULT_SCHOOL_ID, school_name: SYSTEM_DEFAULT_NAME, address: '', contact: '', location: '', logo_url: '', theme_choice: 'emerald', header_theme_choice: 'softWhite', footer_theme_choice: 'midnight', login_background_url: '', font_choice: 'inter', principal_signature_url: '', audio_greeting_enabled: true, login_greeting_template: 'Welcome {firstName}, You may proceed.', logout_greeting_message: 'Goodbye, Nice having you on board.', failed_login_greeting_message: 'Login fails, please verify your identity carefully or contact your school IT department to ratify the issue.', platform_access_locked: false, school_admin_access_locked: false, school_license_plan: '', school_license_label: 'No license issued', school_license_code: '', school_license_status: 'Not Issued', school_license_issued_at: '', school_license_activated_at: '', school_license_expires_at: '', school_license_last_checked_at: '', promotion_pass_mark: 50 };
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 const today = () => new Date().toISOString().slice(0,10);
 const safeArray = v => Array.isArray(v) ? v : [];
@@ -629,6 +638,7 @@ function normalizeCrossModuleConsistency(raw={}) {
       login_greeting_template: String(raw.schoolSettings?.login_greeting_template || defaultSchool.login_greeting_template),
       logout_greeting_message: String(raw.schoolSettings?.logout_greeting_message || defaultSchool.logout_greeting_message),
       failed_login_greeting_message: String(raw.schoolSettings?.failed_login_greeting_message || defaultSchool.failed_login_greeting_message),
+      promotion_pass_mark: normalizePromotionPassMark(raw.schoolSettings?.promotion_pass_mark ?? defaultSchool.promotion_pass_mark),
       platform_access_locked: boolSetting(raw.schoolSettings?.platform_access_locked ?? readPlatformControlSettings().platform_access_locked, defaultSchool.platform_access_locked),
       school_admin_access_locked: boolSetting(raw.schoolSettings?.school_admin_access_locked ?? readPlatformControlSettings().school_admin_access_locked, defaultSchool.school_admin_access_locked),
       school_license_plan: String(raw.schoolSettings?.school_license_plan ?? readPlatformControlSettings().school_license_plan ?? ''),
@@ -748,14 +758,41 @@ function latestAcademicYearFromGrades(grades=[]) {
 }
 function evaluatePromotion(data, student, academicYear='') {
   const year = academicYear || latestAcademicYearFromGrades(data?.grades || []);
+  const passMark = getPromotionPassMark(data);
   const term3Rows = safeArray(data?.grades).filter(g => g.student_id === student?.id && g.term === 'Term 3' && String(g.academic_year || '') === String(year || ''));
   const currentClass = data?.classes?.find(c => c.id === student?.class_id) || null;
   const nextClass = getNextClassForStudent(student, data?.classes || []);
-  if (!student || !currentClass || !term3Rows.length) return { year, evaluated: false, promoted: false, statusText: 'Not promoted', statusColor: 'text-red-700', reportColor: '#b91c1c', currentClass, nextClass, average: 0, rows: term3Rows };
+  if (!student || !currentClass || !term3Rows.length) {
+    return {
+      year,
+      evaluated: false,
+      promoted: false,
+      statusText: 'Pending Term 3 evaluation',
+      statusColor: 'text-amber-700',
+      reportColor: '#b45309',
+      currentClass,
+      nextClass,
+      average: 0,
+      passMark,
+      rows: term3Rows
+    };
+  }
   const average = term3Rows.reduce((sum, row) => sum + Number(row.total_score || 0), 0) / term3Rows.length;
-  const promoted = average >= 50 && !!nextClass;
-  const statusText = promoted ? `Promoted to ${fullClassName(nextClass)}` : 'Not promoted';
-  return { year, evaluated: true, promoted, statusText, statusColor: promoted ? 'text-green-700' : 'text-red-700', reportColor: promoted ? '#15803d' : '#b91c1c', currentClass, nextClass, average: Number(average.toFixed(1)), rows: term3Rows };
+  const promoted = average >= passMark && !!nextClass;
+  const statusText = promoted ? `Promoted to ${fullClassName(nextClass)}` : `Repeat in ${fullClassName(currentClass)}`;
+  return {
+    year,
+    evaluated: true,
+    promoted,
+    statusText,
+    statusColor: promoted ? 'text-green-700' : 'text-red-700',
+    reportColor: promoted ? '#15803d' : '#b91c1c',
+    currentClass,
+    nextClass,
+    average: Number(average.toFixed(1)),
+    passMark,
+    rows: term3Rows
+  };
 }
 
 async function runAutoPromotionAcrossRecords({ data, updateCollection, notify, addArchiveRecord, academicYear='' }) {
@@ -768,7 +805,7 @@ async function runAutoPromotionAcrossRecords({ data, updateCollection, notify, a
     }
   });
   if (!promotedMap.size) {
-    notify('info', `No students qualified for Term 3 auto promotion for ${year}.`);
+    notify('info', `No students met the ${getPromotionPassMark(data)}% Term 3 promotion pass mark for ${year}.`);
     return;
   }
 
@@ -2836,6 +2873,7 @@ function usePersistentSchoolData() {
       login_greeting_template: String(nextVal.login_greeting_template || defaultSchool.login_greeting_template),
       logout_greeting_message: String(nextVal.logout_greeting_message || defaultSchool.logout_greeting_message),
       failed_login_greeting_message: String(nextVal.failed_login_greeting_message || defaultSchool.failed_login_greeting_message),
+      promotion_pass_mark: normalizePromotionPassMark(nextVal.promotion_pass_mark ?? defaultSchool.promotion_pass_mark),
       platform_access_locked: boolSetting(nextVal.platform_access_locked, false),
       school_admin_access_locked: boolSetting(nextVal.school_admin_access_locked, false),
       school_license_plan: String(nextVal.school_license_plan || ''),
@@ -2853,7 +2891,7 @@ function usePersistentSchoolData() {
       return copy;
     };
     let { error } = await safeUpsertSchoolSettings(payload, { onConflict: 'school_id' });
-    if (error && /header_theme_choice|footer_theme_choice|login_background_url|font_choice|platform_access_locked|school_admin_access_locked|school_license_plan|school_license_label|school_license_code|school_license_status|school_license_issued_at|school_license_activated_at|school_license_expires_at|school_license_last_checked_at/i.test(String(error.message || '')) && /column/i.test(String(error.message || ''))) {
+    if (error && /header_theme_choice|footer_theme_choice|login_background_url|font_choice|platform_access_locked|school_admin_access_locked|school_license_plan|school_license_label|school_license_code|school_license_status|school_license_issued_at|school_license_activated_at|school_license_expires_at|school_license_last_checked_at|promotion_pass_mark/i.test(String(error.message || '')) && /column/i.test(String(error.message || ''))) {
       const fallbackPayload = { ...payload };
       delete fallbackPayload.header_theme_choice;
       delete fallbackPayload.footer_theme_choice;
@@ -2863,15 +2901,18 @@ function usePersistentSchoolData() {
       delete fallbackPayload.login_greeting_template;
       delete fallbackPayload.logout_greeting_message;
       delete fallbackPayload.failed_login_greeting_message;
+      delete fallbackPayload.promotion_pass_mark;
       PLATFORM_SETTING_KEYS.forEach(key => { delete fallbackPayload[key]; });
       const fallback = await safeUpsertSchoolSettings(fallbackPayload, { onConflict: 'school_id' });
+      const originalErrorMessage = String(error?.message || '');
       error = fallback.error;
+      if (!error && /promotion_pass_mark/i.test(originalErrorMessage)) return { promotionFallback: true };
     }
     if (error && isThemeConstraintError(error.message)) {
       rememberThemeSelections(payload.theme_choice, payload.header_theme_choice, payload.footer_theme_choice);
       const compatiblePayload = backendCompatibleSchoolThemePayload(payload);
       const compatibleRetry = await safeUpsertSchoolSettings(compatiblePayload, { onConflict: 'school_id' });
-      if (compatibleRetry.error && /header_theme_choice|footer_theme_choice|login_background_url|font_choice|platform_access_locked|school_admin_access_locked|school_license_plan|school_license_label|school_license_code|school_license_status|school_license_issued_at|school_license_activated_at|school_license_expires_at|school_license_last_checked_at/i.test(String(compatibleRetry.error.message || '')) && /column/i.test(String(compatibleRetry.error.message || ''))) {
+      if (compatibleRetry.error && /header_theme_choice|footer_theme_choice|login_background_url|font_choice|platform_access_locked|school_admin_access_locked|school_license_plan|school_license_label|school_license_code|school_license_status|school_license_issued_at|school_license_activated_at|school_license_expires_at|school_license_last_checked_at|promotion_pass_mark/i.test(String(compatibleRetry.error.message || '')) && /column/i.test(String(compatibleRetry.error.message || ''))) {
         const compatibleFallbackPayload = { ...compatiblePayload };
         delete compatibleFallbackPayload.header_theme_choice;
         delete compatibleFallbackPayload.footer_theme_choice;
@@ -2881,6 +2922,7 @@ function usePersistentSchoolData() {
         delete compatibleFallbackPayload.login_greeting_template;
         delete compatibleFallbackPayload.logout_greeting_message;
         delete compatibleFallbackPayload.failed_login_greeting_message;
+        delete compatibleFallbackPayload.promotion_pass_mark;
         PLATFORM_SETTING_KEYS.forEach(key => { delete compatibleFallbackPayload[key]; });
         const compatibleFallback = await safeUpsertSchoolSettings(compatibleFallbackPayload, { onConflict: 'school_id' });
         if (compatibleFallback.error) throw compatibleFallback.error;
@@ -2889,7 +2931,7 @@ function usePersistentSchoolData() {
       }
       return { themeFallback: true };
     }
-    if (error && /platform_access_locked|school_admin_access_locked|school_license_plan|school_license_label|school_license_code|school_license_status|school_license_issued_at|school_license_activated_at|school_license_expires_at|school_license_last_checked_at/i.test(String(error.message || ''))) {
+    if (error && /platform_access_locked|school_admin_access_locked|school_license_plan|school_license_label|school_license_code|school_license_status|school_license_issued_at|school_license_activated_at|school_license_expires_at|school_license_last_checked_at|promotion_pass_mark/i.test(String(error.message || ''))) {
       rememberPlatformControlSettings(nextVal);
       const fallback = await safeUpsertSchoolSettings(stripPlatformPayloadFields(payload), { onConflict: 'school_id' });
       if (fallback.error && /login_background_url|font_choice|audio_greeting_enabled|login_greeting_template|logout_greeting_message|failed_login_greeting_message/i.test(String(fallback.error.message || ''))) {
@@ -3055,7 +3097,7 @@ function usePersistentSchoolData() {
       const nowIso = new Date().toISOString();
       await writeOfflineCache(nextData, { pendingCount: offlineState.pendingCount, lastSyncAt: nowIso });
       setOfflineState(prev => ({ ...prev, isOnline: true, hasCache: true, lastSyncAt: nowIso }));
-      notify('success', syncResult?.themeFallback ? 'School settings saved. Deep theme saved locally; run the theme SQL update once for school-wide backend storage.' : (syncResult?.platformFallback ? 'School settings saved locally. Run the Super Admin SQL update once for school-wide backend storage.' : 'School settings saved.'));
+      notify('success', syncResult?.themeFallback ? 'School settings saved. Deep theme saved locally; run the theme SQL update once for school-wide backend storage.' : (syncResult?.platformFallback ? 'School settings saved locally. Run the Super Admin SQL update once for school-wide backend storage.' : (syncResult?.promotionFallback ? 'School settings saved locally. Run the promotion scale SQL update once for school-wide backend storage.' : 'School settings saved.')));
     } catch (error) {
       console.error('School settings save failed', error);
       setData(data);
@@ -4543,7 +4585,7 @@ function TeacherManagement() {
 
 function StudentManagement() {
   const { data, updateCollection, notify, addArchiveRecord } = React.useContext(DataContext); const [open, setOpen] = React.useState(false); const [form, setForm] = React.useState(emptyStudent);
-  const promotionYear = latestAcademicYearFromGrades(data.grades);
+  const promotionYear = latestAcademicYearFromGrades(data.grades); const promotionPassMark = getPromotionPassMark(data);
   const printStudents = () => openRecordsPrint({
     school: data.schoolSettings,
     title: 'Student Records Report',
@@ -4571,7 +4613,7 @@ function StudentManagement() {
   const runAutoPromotion = async () => {
     await runAutoPromotionAcrossRecords({ data, updateCollection, notify, addArchiveRecord, academicYear: promotionYear });
   };
-  return <div className="space-y-4"><SectionHeader title="Students Management" subtitle={`Term 3 promotion status is auto evaluated from ${promotionYear} results. Promoted students move to the next class when auto promotion is run.`} actions={<><PrintButton label="Print Students Records" onClick={printStudents} /><button onClick={runAutoPromotion} className="btn btn-outline"><i className="fas fa-arrow-up-right-dots mr-2"></i>Run Term 3 Auto Promotion</button><button onClick={() => { setForm(emptyStudent); setOpen(true); }} className="btn btn-primary"><i className="fas fa-plus mr-2"></i>Add Student</button></>} /><Table columns={['Photo','Student No','Full Name','Assigned Class','Gender','Date of Birth','Parent Full Name','Parent Contact','Relationship','Promotion Status','Account','Actions']} rows={data.students} renderCell={(row,c) => { const cls = data.classes.find(x => x.id === row.class_id); const promotion = evaluatePromotion(data, row, promotionYear); if (c === 'Photo') return row.photo_url ? <img src={row.photo_url} className="w-10 h-10 rounded-full object-cover" /> : <i className="fas fa-user-circle text-2xl text-slate-400"></i>; if (c === 'Student No') return row.student_number; if (c === 'Full Name') return row.full_name; if (c === 'Assigned Class') return fullClassName(cls); if (c === 'Gender') return row.gender; if (c === 'Date of Birth') return row.dob; if (c === 'Parent Full Name') return row.parent_full_name; if (c === 'Parent Contact') return row.parent_phone_contact; if (c === 'Relationship') return row.relationship; if (c === 'Promotion Status') return <span className={`font-bold ${promotion.statusColor}`}>{promotion.statusText}</span>; if (c === 'Account') return <span className={`pill ${row.account_active ? 'online' : 'offline'}`}>{row.account_active ? 'Active' : 'Inactive'}</span>; if (c === 'Actions') return <div className="flex gap-2"><button className="btn btn-outline" onClick={() => edit(row)}>Edit</button><button className="btn btn-danger" onClick={() => remove(row.id)}>Delete</button></div>; }} /><Modal open={open} onClose={() => setOpen(false)} title={form.id ? 'Edit Student' : 'Add Student'}><form onSubmit={save} className="space-y-4"><ImageInput label="Student Photo" storageFolder="students" value={form.photo_url} onChange={v => setForm({ ...form, photo_url: v })} /><div className="grid md:grid-cols-2 gap-4"><Field label="Student Full Name"><input className="input" required value={form.full_name} onChange={e => setForm({ ...form, full_name: e.target.value })} /></Field><Field label="Student Number"><input className="input" value={form.student_number} readOnly placeholder="Auto generated by school name" /></Field><Field label="Assign Class"><select className="select" required value={form.class_id} onChange={e => { const cls = data.classes.find(c => c.id === e.target.value); setForm({ ...form, class_id: e.target.value, student_section: cls?.section || '' }); }}><option value="">Select class</option>{data.classes.map(cls => <option key={cls.id} value={cls.id}>{fullClassName(cls)}</option>)}</select></Field><Field label="Class Section or Stream"><input className="input" value={form.student_section} readOnly placeholder="Auto matches selected class structure" /></Field><Field label="Gender"><select className="select" value={form.gender} onChange={e => setForm({ ...form, gender: e.target.value })}>{GENDERS.map(x => <option key={x}>{x}</option>)}</select></Field><Field label="Date of Birth"><input type="date" className="input" value={form.dob} onChange={e => setForm({ ...form, dob: e.target.value })} /></Field><Field label="Parent Full Name"><input className="input" required value={form.parent_full_name} onChange={e => setForm({ ...form, parent_full_name: e.target.value })} /></Field><Field label="Parent Phone Contact"><input className="input" required value={form.parent_phone_contact} onChange={e => setForm({ ...form, parent_phone_contact: e.target.value })} /></Field><Field label="Relationship"><select className="select" value={form.relationship} onChange={e => setForm({ ...form, relationship: e.target.value })}>{RELATIONSHIPS.map(x => <option key={x}>{x}</option>)}</select></Field></div><div className="flex justify-end gap-2"><button type="button" className="btn btn-secondary" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary">Save Student</button></div></form></Modal></div>;
+  return <div className="space-y-4"><SectionHeader title="Students Management" subtitle={`Term 3 promotion status is auto evaluated from ${promotionYear} results using ${promotionPassMark}% as the school promotion pass mark. Promoted students move to the next class when auto promotion is run.`} actions={<><PrintButton label="Print Students Records" onClick={printStudents} /><button onClick={runAutoPromotion} className="btn btn-outline"><i className="fas fa-arrow-up-right-dots mr-2"></i>Run Term 3 Auto Promotion</button><button onClick={() => { setForm(emptyStudent); setOpen(true); }} className="btn btn-primary"><i className="fas fa-plus mr-2"></i>Add Student</button></>} /><Table columns={['Photo','Student No','Full Name','Assigned Class','Gender','Date of Birth','Parent Full Name','Parent Contact','Relationship','Promotion Status','Account','Actions']} rows={data.students} renderCell={(row,c) => { const cls = data.classes.find(x => x.id === row.class_id); const promotion = evaluatePromotion(data, row, promotionYear); if (c === 'Photo') return row.photo_url ? <img src={row.photo_url} className="w-10 h-10 rounded-full object-cover" /> : <i className="fas fa-user-circle text-2xl text-slate-400"></i>; if (c === 'Student No') return row.student_number; if (c === 'Full Name') return row.full_name; if (c === 'Assigned Class') return fullClassName(cls); if (c === 'Gender') return row.gender; if (c === 'Date of Birth') return row.dob; if (c === 'Parent Full Name') return row.parent_full_name; if (c === 'Parent Contact') return row.parent_phone_contact; if (c === 'Relationship') return row.relationship; if (c === 'Promotion Status') return <span className={`font-bold ${promotion.statusColor}`}>{promotion.statusText}</span>; if (c === 'Account') return <span className={`pill ${row.account_active ? 'online' : 'offline'}`}>{row.account_active ? 'Active' : 'Inactive'}</span>; if (c === 'Actions') return <div className="flex gap-2"><button className="btn btn-outline" onClick={() => edit(row)}>Edit</button><button className="btn btn-danger" onClick={() => remove(row.id)}>Delete</button></div>; }} /><Modal open={open} onClose={() => setOpen(false)} title={form.id ? 'Edit Student' : 'Add Student'}><form onSubmit={save} className="space-y-4"><ImageInput label="Student Photo" storageFolder="students" value={form.photo_url} onChange={v => setForm({ ...form, photo_url: v })} /><div className="grid md:grid-cols-2 gap-4"><Field label="Student Full Name"><input className="input" required value={form.full_name} onChange={e => setForm({ ...form, full_name: e.target.value })} /></Field><Field label="Student Number"><input className="input" value={form.student_number} readOnly placeholder="Auto generated by school name" /></Field><Field label="Assign Class"><select className="select" required value={form.class_id} onChange={e => { const cls = data.classes.find(c => c.id === e.target.value); setForm({ ...form, class_id: e.target.value, student_section: cls?.section || '' }); }}><option value="">Select class</option>{data.classes.map(cls => <option key={cls.id} value={cls.id}>{fullClassName(cls)}</option>)}</select></Field><Field label="Class Section or Stream"><input className="input" value={form.student_section} readOnly placeholder="Auto matches selected class structure" /></Field><Field label="Gender"><select className="select" value={form.gender} onChange={e => setForm({ ...form, gender: e.target.value })}>{GENDERS.map(x => <option key={x}>{x}</option>)}</select></Field><Field label="Date of Birth"><input type="date" className="input" value={form.dob} onChange={e => setForm({ ...form, dob: e.target.value })} /></Field><Field label="Parent Full Name"><input className="input" required value={form.parent_full_name} onChange={e => setForm({ ...form, parent_full_name: e.target.value })} /></Field><Field label="Parent Phone Contact"><input className="input" required value={form.parent_phone_contact} onChange={e => setForm({ ...form, parent_phone_contact: e.target.value })} /></Field><Field label="Relationship"><select className="select" value={form.relationship} onChange={e => setForm({ ...form, relationship: e.target.value })}>{RELATIONSHIPS.map(x => <option key={x}>{x}</option>)}</select></Field></div><div className="flex justify-end gap-2"><button type="button" className="btn btn-secondary" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn btn-primary">Save Student</button></div></form></Modal></div>;
 }
 
 function ParentManagement() {
@@ -5679,6 +5721,11 @@ function PrincipalDashboard({ activeNav }) {
   const { session } = React.useContext(SessionContext);
   const principal = data.principals.find(p => p.id === session.linkedId) || data.principals[0];
   const [uploadingSignature, setUploadingSignature] = React.useState(false);
+  const [promotionPassMarkForm, setPromotionPassMarkForm] = React.useState(getPromotionPassMark(data));
+  React.useEffect(() => {
+    setPromotionPassMarkForm(getPromotionPassMark(data));
+  }, [data.schoolSettings?.promotion_pass_mark]);
+
   if (!principal) return <EmptyState text="No principal record found." />;
 
   const handleSignatureUpload = async (event) => {
@@ -5709,6 +5756,20 @@ function PrincipalDashboard({ activeNav }) {
     }
   };
 
+  const savePrincipalPromotionScale = async () => {
+    try {
+      const passMark = normalizePromotionPassMark(promotionPassMarkForm || defaultSchool.promotion_pass_mark);
+      await setSchoolSettings(current => ({
+        ...current,
+        promotion_pass_mark: passMark
+      }));
+      setPromotionPassMarkForm(passMark);
+      notify('success', 'Academic promotion pass mark updated successfully.');
+    } catch (error) {
+      notify('error', error?.message || 'Failed to save promotion pass mark.');
+    }
+  };
+
   if (activeNav === 'dashboard') {
     const attendanceOverview = data.attendance.length;
     const performanceOverview = data.grades.filter(g => !!g.is_published).length;
@@ -5731,6 +5792,27 @@ function PrincipalDashboard({ activeNav }) {
         <div className="card p-5">
           <h3 className="font-bold mb-3">Recent Academic Updates</h3>
           <ul className="space-y-2 text-sm">{data.grades.filter(g => !!g.is_published).slice(0,5).map(g => <li key={g.id}>{data.students.find(s => s.id === g.student_id)?.full_name} received {g.total_score}% in {data.subjects.find(s => s.id === g.subject_id)?.name}.</li>)}</ul>
+        </div>
+      </div>
+      <div className="card p-5 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+          <div>
+            <h3 className="font-bold text-lg text-amber-900">Academic Performance Promotion Scale</h3>
+            <p className="text-sm text-slate-600">Set the minimum Term 3 average score required for students to qualify for promotion to the next class. This principal setting controls the school's promotion standard.</p>
+          </div>
+          <button type="button" className="btn btn-primary" onClick={savePrincipalPromotionScale}>
+            <i className="fas fa-save mr-2"></i>Save Promotion Scale
+          </button>
+        </div>
+        <div className="grid md:grid-cols-2 gap-4 items-end">
+          <Field label="Term 3 Promotion Pass Mark">
+            <select className="select" value={normalizePromotionPassMark(promotionPassMarkForm)} onChange={e => setPromotionPassMarkForm(Number(e.target.value))}>
+              {PROMOTION_PASS_MARK_OPTIONS.map(value => <option key={value} value={value}>{value}%</option>)}
+            </select>
+          </Field>
+          <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-sm text-amber-900">
+            Current rule: students with Term 3 average below <b>{normalizePromotionPassMark(promotionPassMarkForm)}%</b> will repeat their current class. Students who meet or exceed this mark qualify for promotion when auto promotion is run.
+          </div>
         </div>
       </div>
       <div className="card p-5 space-y-4">
@@ -5780,7 +5862,7 @@ function PrincipalDashboard({ activeNav }) {
 
 function PrincipalStudents() {
   const { data, updateCollection, notify, addArchiveRecord } = React.useContext(DataContext); const [filterClass, setFilterClass] = React.useState('');
-  const promotionYear = latestAcademicYearFromGrades(data.grades);
+  const promotionYear = latestAcademicYearFromGrades(data.grades); const promotionPassMark = getPromotionPassMark(data);
   const rows = safeArray(data.students).filter(s => !filterClass || s.class_id === filterClass);
   const printStudents = () => openRecordsPrint({
     school: data.schoolSettings,
@@ -5805,7 +5887,7 @@ function PrincipalStudents() {
   const runAutoPromotion = async () => {
     await runAutoPromotionAcrossRecords({ data, updateCollection, notify, addArchiveRecord, academicYear: promotionYear });
   };
-  return <div className="space-y-4"><SectionHeader title="Student Management" subtitle={`View only student records with real time class filtering. Term 3 promotion status is evaluated from ${promotionYear} results.`} actions={<><Field label=""><select className="select" value={filterClass} onChange={e => setFilterClass(e.target.value)}><option value="">All classes</option>{data.classes.map(c => <option key={c.id} value={c.id}>{fullClassName(c)}</option>)}</select></Field><button onClick={runAutoPromotion} className="btn btn-outline"><i className="fas fa-arrow-up-right-dots mr-2"></i>Run Term 3 Auto Promotion</button><PrintButton label="Print Students Records" onClick={printStudents} /></>} /><Table columns={['Full Name','Student No','Assigned Class','Gender','Date of Birth','Parent Full Name','Parent Contact','Promotion Status','Account']} rows={rows} renderCell={(row,c) => { const promotion = evaluatePromotion(data, row, promotionYear); if (c === 'Full Name') return row.full_name; if (c === 'Student No') return row.student_number; if (c === 'Assigned Class') return fullClassName(data.classes.find(x => x.id === row.class_id)); if (c === 'Gender') return row.gender; if (c === 'Date of Birth') return row.dob; if (c === 'Parent Full Name') return row.parent_full_name; if (c === 'Parent Contact') return row.parent_phone_contact; if (c === 'Promotion Status') return <span className={`font-bold ${promotion.statusColor}`}>{promotion.statusText}</span>; if (c === 'Account') return <span className={`pill ${row.account_active ? 'online' : 'offline'}`}>{row.account_active ? 'Active' : 'Inactive'}</span>; }} /></div>;
+  return <div className="space-y-4"><SectionHeader title="Student Management" subtitle={`View only student records with real time class filtering. Term 3 promotion status is evaluated from ${promotionYear} results using ${promotionPassMark}% as the school promotion pass mark.`} actions={<><Field label=""><select className="select" value={filterClass} onChange={e => setFilterClass(e.target.value)}><option value="">All classes</option>{data.classes.map(c => <option key={c.id} value={c.id}>{fullClassName(c)}</option>)}</select></Field><button onClick={runAutoPromotion} className="btn btn-outline"><i className="fas fa-arrow-up-right-dots mr-2"></i>Run Term 3 Auto Promotion</button><PrintButton label="Print Students Records" onClick={printStudents} /></>} /><Table columns={['Full Name','Student No','Assigned Class','Gender','Date of Birth','Parent Full Name','Parent Contact','Promotion Status','Account']} rows={rows} renderCell={(row,c) => { const promotion = evaluatePromotion(data, row, promotionYear); if (c === 'Full Name') return row.full_name; if (c === 'Student No') return row.student_number; if (c === 'Assigned Class') return fullClassName(data.classes.find(x => x.id === row.class_id)); if (c === 'Gender') return row.gender; if (c === 'Date of Birth') return row.dob; if (c === 'Parent Full Name') return row.parent_full_name; if (c === 'Parent Contact') return row.parent_phone_contact; if (c === 'Promotion Status') return <span className={`font-bold ${promotion.statusColor}`}>{promotion.statusText}</span>; if (c === 'Account') return <span className={`pill ${row.account_active ? 'online' : 'offline'}`}>{row.account_active ? 'Active' : 'Inactive'}</span>; }} /></div>;
 }
 
 function PrincipalTeachers() {
